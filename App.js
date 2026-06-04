@@ -7,7 +7,9 @@ import {
   Pressable,
   View,
   FlatList,
+  ScrollView,
 } from "react-native";
+import AsyncStorage from "@react-native-async-storage/async-storage";
 import {
   collection,
   doc,
@@ -19,23 +21,7 @@ import {
 import { db } from "./src/firebase";
 
 const SCHOOL_ID = "demo-school";
-
-const initialStudents = [
-  {
-    id: "student-1",
-    name: "Anjay",
-    email: "anjay@student.com",
-    location: "Room 204",
-    status: "NO_RESPONSE",
-  },
-  {
-    id: "student-2",
-    name: "Maya",
-    email: "maya@student.com",
-    location: "Library",
-    status: "NO_RESPONSE",
-  },
-];
+const PROFILE_STORAGE_KEY = "dhh_emergency_profile_v1";
 
 const activeAlertRef = doc(
   db,
@@ -48,44 +34,34 @@ const activeAlertRef = doc(
 const statusesRef = collection(db, "schools", SCHOOL_ID, "statuses");
 
 export default function App() {
-  const [role, setRole] = useState(null);
-  const [name, setName] = useState("");
+  const [profile, setProfile] = useState(null);
   const [activeAlert, setActiveAlert] = useState(null);
-  const [students, setStudents] = useState(initialStudents);
+  const [students, setStudents] = useState([]);
   const [loading, setLoading] = useState(true);
 
   useEffect(() => {
-    async function seedStudentsIfNeeded() {
-      const snapshot = await getDocs(statusesRef);
+    async function loadProfile() {
+      const savedProfile = await AsyncStorage.getItem(PROFILE_STORAGE_KEY);
 
-      if (snapshot.empty) {
-        for (const student of initialStudents) {
-          await setDoc(
-            doc(db, "schools", SCHOOL_ID, "statuses", student.id),
-            {
-              ...student,
-              updatedAt: serverTimestamp(),
-            },
-            { merge: true }
-          );
-        }
+      if (savedProfile) {
+        setProfile(JSON.parse(savedProfile));
       }
+
+      setLoading(false);
     }
 
-    seedStudentsIfNeeded();
+    loadProfile();
   }, []);
 
   useEffect(() => {
     const unsubscribeAlert = onSnapshot(activeAlertRef, (snapshot) => {
       if (!snapshot.exists()) {
         setActiveAlert(null);
-        setLoading(false);
         return;
       }
 
       const data = snapshot.data();
       setActiveAlert(data.active ? data : null);
-      setLoading(false);
     });
 
     return unsubscribeAlert;
@@ -98,16 +74,38 @@ export default function App() {
         ...docSnap.data(),
       }));
 
-      if (rows.length > 0) {
-        setStudents(rows);
-      }
+      setStudents(rows);
     });
 
     return unsubscribeStatuses;
   }, []);
 
-  function loginAs(selectedRole) {
-    setRole(selectedRole);
+  async function saveProfile(newProfile) {
+    await AsyncStorage.setItem(PROFILE_STORAGE_KEY, JSON.stringify(newProfile));
+    setProfile(newProfile);
+
+    if (newProfile.role === "student") {
+      await setDoc(
+        doc(db, "schools", SCHOOL_ID, "statuses", newProfile.id),
+        {
+          id: newProfile.id,
+          name: newProfile.name,
+          role: "student",
+          schoolCode: newProfile.schoolCode,
+          classCode: newProfile.classCode,
+          location: newProfile.room,
+          accessibilityNeeds: newProfile.accessibilityNeeds,
+          status: "NO_RESPONSE",
+          updatedAt: serverTimestamp(),
+        },
+        { merge: true }
+      );
+    }
+  }
+
+  async function resetProfile() {
+    await AsyncStorage.removeItem(PROFILE_STORAGE_KEY);
+    setProfile(null);
   }
 
   async function createAlert(type) {
@@ -125,11 +123,12 @@ export default function App() {
       createdAt: serverTimestamp(),
     });
 
-    for (const student of initialStudents) {
+    const snapshot = await getDocs(statusesRef);
+
+    for (const studentDoc of snapshot.docs) {
       await setDoc(
-        doc(db, "schools", SCHOOL_ID, "statuses", student.id),
+        doc(db, "schools", SCHOOL_ID, "statuses", studentDoc.id),
         {
-          ...student,
           status: "NO_RESPONSE",
           activeAlertId: alertId,
           updatedAt: serverTimestamp(),
@@ -149,11 +148,14 @@ export default function App() {
       { merge: true }
     );
 
-    for (const student of initialStudents) {
+    const snapshot = await getDocs(statusesRef);
+
+    for (const studentDoc of snapshot.docs) {
       await setDoc(
-        doc(db, "schools", SCHOOL_ID, "statuses", student.id),
+        doc(db, "schools", SCHOOL_ID, "statuses", studentDoc.id),
         {
           status: "NO_RESPONSE",
+          activeAlertId: null,
           updatedAt: serverTimestamp(),
         },
         { merge: true }
@@ -162,13 +164,18 @@ export default function App() {
   }
 
   async function updateStudentStatus(status) {
+    if (!profile || profile.role !== "student") return;
+
     await setDoc(
-      doc(db, "schools", SCHOOL_ID, "statuses", "student-1"),
+      doc(db, "schools", SCHOOL_ID, "statuses", profile.id),
       {
-        id: "student-1",
-        name: "Anjay",
-        email: "anjay@student.com",
-        location: "Room 204",
+        id: profile.id,
+        name: profile.name,
+        role: "student",
+        schoolCode: profile.schoolCode,
+        classCode: profile.classCode,
+        location: profile.room,
+        accessibilityNeeds: profile.accessibilityNeeds,
         status,
         activeAlertId: activeAlert?.id ?? null,
         updatedAt: serverTimestamp(),
@@ -177,82 +184,179 @@ export default function App() {
     );
   }
 
-  function logout() {
-    setRole(null);
-    setName("");
-  }
-
   if (loading) {
     return (
       <SafeAreaView style={styles.loadingScreen}>
-        <Text style={styles.loadingText}>Connecting to Firebase...</Text>
+        <Text style={styles.loadingText}>Loading emergency profile...</Text>
       </SafeAreaView>
     );
   }
 
-  if (!role) {
-    return (
-      <SafeAreaView style={styles.loginScreen}>
-        <Text style={styles.appTitle}>DHH Emergency Access</Text>
-        <Text style={styles.appSubtitle}>
-          Visual emergency guidance for hard-of-hearing students.
-        </Text>
-
-        <TextInput
-          style={styles.input}
-          placeholder="Name"
-          placeholderTextColor="#94A3B8"
-          value={name}
-          onChangeText={setName}
-        />
-
-        <Pressable style={styles.loginButton} onPress={() => loginAs("student")}>
-          <Text style={styles.loginButtonText}>Login as Student</Text>
-        </Pressable>
-
-        <Pressable style={styles.loginButton} onPress={() => loginAs("teacher")}>
-          <Text style={styles.loginButtonText}>Login as Teacher</Text>
-        </Pressable>
-
-        <Pressable style={styles.adminButton} onPress={() => loginAs("admin")}>
-          <Text style={styles.loginButtonText}>Login as Admin</Text>
-        </Pressable>
-      </SafeAreaView>
-    );
+  if (!profile) {
+    return <SetupScreen onSaveProfile={saveProfile} />;
   }
 
-  if (role === "student") {
-    const student = students.find((item) => item.id === "student-1") ?? initialStudents[0];
+  if (profile.role === "student") {
+    const student =
+      students.find((item) => item.id === profile.id) ?? {
+        id: profile.id,
+        name: profile.name,
+        location: profile.room,
+        classCode: profile.classCode,
+        accessibilityNeeds: profile.accessibilityNeeds,
+        status: "NO_RESPONSE",
+      };
 
     return (
       <StudentScreen
-        activeAlert={activeAlert}
+        profile={profile}
         student={student}
+        activeAlert={activeAlert}
         onSafe={() => updateStudentStatus("SAFE")}
         onNeedHelp={() => updateStudentStatus("NEED_HELP")}
-        onLogout={logout}
+        onResetProfile={resetProfile}
       />
     );
   }
 
   return (
     <DashboardScreen
-      role={role}
+      profile={profile}
       activeAlert={activeAlert}
       students={students}
       onCreateAlert={createAlert}
       onEndAlert={endAlert}
-      onLogout={logout}
+      onResetProfile={resetProfile}
     />
   );
 }
 
+function SetupScreen({ onSaveProfile }) {
+  const [role, setRole] = useState("student");
+  const [name, setName] = useState("");
+  const [schoolCode, setSchoolCode] = useState("demo-school");
+  const [room, setRoom] = useState("Room 204");
+  const [classCode, setClassCode] = useState("WONG-204");
+  const [accessibilityNeeds, setAccessibilityNeeds] = useState(
+    "Hard of hearing"
+  );
+
+  function handleSave() {
+    const id =
+      role === "student"
+        ? `student-${Date.now()}`
+        : `${role}-${Date.now()}`;
+
+    const newProfile = {
+      id,
+      role,
+      name: name.trim() || (role === "student" ? "Student" : "Staff"),
+      schoolCode: schoolCode.trim() || "demo-school",
+      room: room.trim() || "Unknown room",
+      classCode: classCode.trim() || "GENERAL",
+      accessibilityNeeds:
+        accessibilityNeeds.trim() || "No accessibility needs listed",
+    };
+
+    onSaveProfile(newProfile);
+  }
+
+  return (
+    <SafeAreaView style={styles.setupScreen}>
+      <ScrollView contentContainerStyle={styles.setupContent}>
+        <Text style={styles.appTitle}>Emergency Profile Setup</Text>
+        <Text style={styles.appSubtitle}>
+          Set this up once during a normal school day. During an emergency, the
+          app will skip setup and open directly into emergency mode.
+        </Text>
+
+        <Text style={styles.label}>Choose role</Text>
+
+        <View style={styles.roleRow}>
+          {["student", "teacher", "admin"].map((item) => (
+            <Pressable
+              key={item}
+              style={[styles.roleButton, role === item && styles.roleSelected]}
+              onPress={() => setRole(item)}
+            >
+              <Text style={styles.roleButtonText}>{item.toUpperCase()}</Text>
+            </Pressable>
+          ))}
+        </View>
+
+        <Text style={styles.label}>Name</Text>
+        <TextInput
+          style={styles.input}
+          placeholder="Anjay"
+          placeholderTextColor="#94A3B8"
+          value={name}
+          onChangeText={setName}
+        />
+
+        <Text style={styles.label}>School code</Text>
+        <TextInput
+          style={styles.input}
+          placeholder="demo-school"
+          placeholderTextColor="#94A3B8"
+          value={schoolCode}
+          onChangeText={setSchoolCode}
+        />
+
+        {role === "student" && (
+          <>
+            <Text style={styles.label}>Current/default room</Text>
+            <TextInput
+              style={styles.input}
+              placeholder="Room 204"
+              placeholderTextColor="#94A3B8"
+              value={room}
+              onChangeText={setRoom}
+            />
+
+            <Text style={styles.label}>Accessibility needs</Text>
+            <TextInput
+              style={styles.input}
+              placeholder="Hard of hearing"
+              placeholderTextColor="#94A3B8"
+              value={accessibilityNeeds}
+              onChangeText={setAccessibilityNeeds}
+            />
+          </>
+        )}
+
+        {(role === "student" || role === "teacher") && (
+          <>
+            <Text style={styles.label}>Class / teacher code</Text>
+            <TextInput
+              style={styles.input}
+              placeholder="WONG-204"
+              placeholderTextColor="#94A3B8"
+              value={classCode}
+              onChangeText={setClassCode}
+            />
+
+            <Text style={styles.helperText}>
+              Students and teachers with the same class code are matched
+              automatically.
+            </Text>
+          </>
+        )}
+
+        <Pressable style={styles.saveButton} onPress={handleSave}>
+          <Text style={styles.saveButtonText}>Save Emergency Profile</Text>
+        </Pressable>
+      </ScrollView>
+    </SafeAreaView>
+  );
+}
+
 function StudentScreen({
-  activeAlert,
+  profile,
   student,
+  activeAlert,
   onSafe,
   onNeedHelp,
-  onLogout,
+  onResetProfile,
 }) {
   if (!activeAlert) {
     return (
@@ -262,15 +366,23 @@ function StudentScreen({
 
         <View style={styles.smallCard}>
           <Text style={styles.smallLabel}>Student</Text>
-          <Text style={styles.smallValue}>{student.name}</Text>
+          <Text style={styles.smallValue}>{profile.name}</Text>
+
           <Text style={styles.smallLabel}>Location</Text>
-          <Text style={styles.smallValue}>{student.location}</Text>
+          <Text style={styles.smallValue}>{profile.room}</Text>
+
+          <Text style={styles.smallLabel}>Class code</Text>
+          <Text style={styles.smallValue}>{profile.classCode}</Text>
+
+          <Text style={styles.smallLabel}>Accessibility</Text>
+          <Text style={styles.smallValue}>{profile.accessibilityNeeds}</Text>
+
           <Text style={styles.smallLabel}>Status</Text>
           <Text style={styles.smallValue}>{student.status}</Text>
         </View>
 
-        <Pressable style={styles.logoutButton} onPress={onLogout}>
-          <Text style={styles.logoutText}>Logout / Switch Role</Text>
+        <Pressable style={styles.resetButton} onPress={onResetProfile}>
+          <Text style={styles.resetText}>Reset Demo Profile</Text>
         </Pressable>
       </SafeAreaView>
     );
@@ -297,7 +409,7 @@ function StudentScreen({
 
       <View style={styles.routeCard}>
         <Text style={styles.routeLabel}>Your location</Text>
-        <Text style={styles.routeValue}>{student.location}</Text>
+        <Text style={styles.routeValue}>{profile.room}</Text>
 
         <Text style={styles.routeLabel}>Guidance</Text>
         <Text style={styles.routeValue}>{activeAlert.route}</Text>
@@ -316,26 +428,43 @@ function StudentScreen({
         <Text style={styles.bigButtonText}>I Need Help</Text>
       </Pressable>
 
-      <Pressable style={styles.emergencyLogoutButton} onPress={onLogout}>
-        <Text style={styles.emergencyLogoutText}>Logout / Switch Role</Text>
+      <Pressable style={styles.emergencyResetButton} onPress={onResetProfile}>
+        <Text style={styles.emergencyResetText}>Reset Demo Profile</Text>
       </Pressable>
     </SafeAreaView>
   );
 }
 
 function DashboardScreen({
-  role,
+  profile,
   activeAlert,
   students,
   onCreateAlert,
   onEndAlert,
-  onLogout,
+  onResetProfile,
 }) {
+  const visibleStudents =
+    profile.role === "teacher"
+      ? students.filter((student) => student.classCode === profile.classCode)
+      : students;
+
   return (
     <SafeAreaView style={styles.dashboardScreen}>
       <Text style={styles.dashboardTitle}>
-        {role === "admin" ? "Admin Command Center" : "Teacher Dashboard"}
+        {profile.role === "admin" ? "Admin Command Center" : "Teacher Dashboard"}
       </Text>
+
+      <View style={styles.smallDashboardCard}>
+        <Text style={styles.smallLabel}>Profile</Text>
+        <Text style={styles.smallValue}>{profile.name}</Text>
+
+        {profile.role === "teacher" && (
+          <>
+            <Text style={styles.smallLabel}>Class code</Text>
+            <Text style={styles.smallValue}>{profile.classCode}</Text>
+          </>
+        )}
+      </View>
 
       <Text style={styles.sectionTitle}>Active Alert</Text>
 
@@ -345,7 +474,7 @@ function DashboardScreen({
         </Text>
       </View>
 
-      {role === "admin" && (
+      {profile.role === "admin" && (
         <View style={styles.adminPanel}>
           <Text style={styles.sectionTitle}>Create Alert</Text>
 
@@ -383,11 +512,20 @@ function DashboardScreen({
         </View>
       )}
 
-      <Text style={styles.sectionTitle}>Live Student Status</Text>
+      <Text style={styles.sectionTitle}>
+        {profile.role === "teacher"
+          ? "Matched Student Status"
+          : "All Student Status"}
+      </Text>
 
       <FlatList
-        data={students}
+        data={visibleStudents}
         keyExtractor={(item) => item.id}
+        ListEmptyComponent={
+          <Text style={styles.emptyText}>
+            No matched students yet. Use the same class code on a student setup.
+          </Text>
+        }
         renderItem={({ item }) => (
           <View
             style={[
@@ -398,14 +536,20 @@ function DashboardScreen({
             ]}
           >
             <Text style={styles.studentName}>{item.name}</Text>
-            <Text style={styles.studentDetail}>{item.location}</Text>
+            <Text style={styles.studentDetail}>Location: {item.location}</Text>
+            <Text style={styles.studentDetail}>
+              Class code: {item.classCode}
+            </Text>
+            <Text style={styles.studentDetail}>
+              Accessibility: {item.accessibilityNeeds}
+            </Text>
             <Text style={styles.studentStatus}>{item.status}</Text>
           </View>
         )}
       />
 
-      <Pressable style={styles.logoutButton} onPress={onLogout}>
-        <Text style={styles.logoutText}>Logout / Switch Role</Text>
+      <Pressable style={styles.resetButton} onPress={onResetProfile}>
+        <Text style={styles.resetText}>Reset Demo Profile</Text>
       </Pressable>
     </SafeAreaView>
   );
@@ -460,11 +604,13 @@ const styles = StyleSheet.create({
     fontSize: 22,
     fontWeight: "800",
   },
-  loginScreen: {
+  setupScreen: {
     flex: 1,
     backgroundColor: "#0F172A",
-    justifyContent: "center",
+  },
+  setupContent: {
     padding: 24,
+    paddingTop: 60,
   },
   appTitle: {
     color: "white",
@@ -478,6 +624,20 @@ const styles = StyleSheet.create({
     fontSize: 17,
     textAlign: "center",
     marginBottom: 28,
+    lineHeight: 24,
+  },
+  label: {
+    color: "white",
+    fontSize: 16,
+    fontWeight: "900",
+    marginBottom: 8,
+    marginTop: 12,
+  },
+  helperText: {
+    color: "#CBD5E1",
+    fontSize: 14,
+    lineHeight: 20,
+    marginBottom: 10,
   },
   input: {
     backgroundColor: "#1E293B",
@@ -485,23 +645,39 @@ const styles = StyleSheet.create({
     padding: 16,
     borderRadius: 14,
     fontSize: 18,
-    marginBottom: 16,
+    marginBottom: 8,
+    borderWidth: 1,
+    borderColor: "#334155",
   },
-  loginButton: {
+  roleRow: {
+    flexDirection: "row",
+    gap: 8,
+    marginBottom: 8,
+  },
+  roleButton: {
+    flex: 1,
+    backgroundColor: "#334155",
+    padding: 12,
+    borderRadius: 12,
+    alignItems: "center",
+  },
+  roleSelected: {
     backgroundColor: "#2563EB",
-    padding: 18,
-    borderRadius: 16,
-    alignItems: "center",
-    marginBottom: 12,
   },
-  adminButton: {
-    backgroundColor: "#7C3AED",
-    padding: 18,
-    borderRadius: 16,
-    alignItems: "center",
-    marginBottom: 12,
+  roleButtonText: {
+    color: "white",
+    fontSize: 12,
+    fontWeight: "900",
   },
-  loginButtonText: {
+  saveButton: {
+    backgroundColor: "#16A34A",
+    padding: 18,
+    borderRadius: 18,
+    alignItems: "center",
+    marginTop: 24,
+    marginBottom: 40,
+  },
+  saveButtonText: {
     color: "white",
     fontSize: 20,
     fontWeight: "900",
@@ -530,6 +706,12 @@ const styles = StyleSheet.create({
     borderRadius: 18,
     width: "100%",
     marginBottom: 20,
+  },
+  smallDashboardCard: {
+    backgroundColor: "#1E293B",
+    padding: 16,
+    borderRadius: 16,
+    marginBottom: 8,
   },
   smallLabel: {
     color: "#94A3B8",
@@ -631,21 +813,21 @@ const styles = StyleSheet.create({
     borderRadius: 20,
     alignItems: "center",
   },
-  emergencyLogoutButton: {
-    marginTop: 18,
-    alignSelf: "center",
-    padding: 12,
-  },
-  emergencyLogoutText: {
-    color: "white",
-    fontSize: 16,
-    fontWeight: "800",
-    textDecorationLine: "underline",
-  },
   bigButtonText: {
     color: "white",
     fontSize: 26,
     fontWeight: "900",
+  },
+  emergencyResetButton: {
+    marginTop: 18,
+    alignSelf: "center",
+    padding: 12,
+  },
+  emergencyResetText: {
+    color: "white",
+    fontSize: 16,
+    fontWeight: "800",
+    textDecorationLine: "underline",
   },
   dashboardScreen: {
     flex: 1,
@@ -746,12 +928,18 @@ const styles = StyleSheet.create({
     fontWeight: "900",
     marginTop: 6,
   },
-  logoutButton: {
+  emptyText: {
+    color: "#CBD5E1",
+    fontSize: 16,
+    lineHeight: 22,
+    marginTop: 10,
+  },
+  resetButton: {
     marginTop: 18,
     alignSelf: "center",
     padding: 12,
   },
-  logoutText: {
+  resetText: {
     color: "#CBD5E1",
     fontSize: 16,
     textDecorationLine: "underline",
