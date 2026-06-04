@@ -1,4 +1,4 @@
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import {
   SafeAreaView,
   StyleSheet,
@@ -8,8 +8,10 @@ import {
   View,
   FlatList,
   ScrollView,
+  Animated,
 } from "react-native";
 import AsyncStorage from "@react-native-async-storage/async-storage";
+import * as Haptics from "expo-haptics";
 import {
   collection,
   doc,
@@ -163,7 +165,7 @@ export default function App() {
     }
   }
 
-  async function updateStudentStatus(status) {
+  async function updateStudentStatus(status, helpReason = null) {
     if (!profile || profile.role !== "student") return;
 
     await setDoc(
@@ -177,6 +179,7 @@ export default function App() {
         location: profile.room,
         accessibilityNeeds: profile.accessibilityNeeds,
         status,
+        helpReason: status === "NEED_HELP" ? helpReason : null,
         activeAlertId: activeAlert?.id ?? null,
         updatedAt: serverTimestamp(),
       },
@@ -213,7 +216,7 @@ export default function App() {
         student={student}
         activeAlert={activeAlert}
         onSafe={() => updateStudentStatus("SAFE")}
-        onNeedHelp={() => updateStudentStatus("NEED_HELP")}
+        onNeedHelp={(reason) => updateStudentStatus("NEED_HELP", reason)}
         onResetProfile={resetProfile}
       />
     );
@@ -243,9 +246,7 @@ function SetupScreen({ onSaveProfile }) {
 
   function handleSave() {
     const id =
-      role === "student"
-        ? `student-${Date.now()}`
-        : `${role}-${Date.now()}`;
+      role === "student" ? `student-${Date.now()}` : `${role}-${Date.now()}`;
 
     const newProfile = {
       id,
@@ -358,6 +359,55 @@ function StudentScreen({
   onNeedHelp,
   onResetProfile,
 }) {
+  const pulseAnim = useRef(new Animated.Value(1)).current;
+  const lastAlertIdRef = useRef(null);
+  const [helpReason, setHelpReason] = useState("I cannot hear instructions");
+
+  useEffect(() => {
+    if (!activeAlert) return;
+
+    if (lastAlertIdRef.current !== activeAlert.id) {
+      lastAlertIdRef.current = activeAlert.id;
+
+      async function runAttentionSequence() {
+        await Haptics.notificationAsync(Haptics.NotificationFeedbackType.Warning);
+
+        setTimeout(() => {
+          Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Heavy);
+        }, 700);
+
+        setTimeout(() => {
+          Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Heavy);
+        }, 1400);
+      }
+
+      runAttentionSequence();
+    }
+  }, [activeAlert]);
+
+  useEffect(() => {
+    if (!activeAlert) return;
+
+    const animation = Animated.loop(
+      Animated.sequence([
+        Animated.timing(pulseAnim, {
+          toValue: 1.08,
+          duration: 450,
+          useNativeDriver: true,
+        }),
+        Animated.timing(pulseAnim, {
+          toValue: 1,
+          duration: 450,
+          useNativeDriver: true,
+        }),
+      ])
+    );
+
+    animation.start();
+
+    return () => animation.stop();
+  }, [activeAlert, pulseAnim]);
+
   if (!activeAlert) {
     return (
       <SafeAreaView style={styles.normalScreen}>
@@ -398,39 +448,80 @@ function StudentScreen({
         activeAlert.type === "drill" && styles.drillBackground,
       ]}
     >
-      <Text style={styles.emergencyTitle}>{activeAlert.title}</Text>
+      <ScrollView
+        contentContainerStyle={styles.emergencyScrollContent}
+        showsVerticalScrollIndicator={false}
+      >
+        <Animated.Text
+          style={[
+            styles.emergencyTitle,
+            {
+              transform: [{ scale: pulseAnim }],
+            },
+          ]}
+        >
+          {activeAlert.title}
+        </Animated.Text>
 
-      <View style={styles.instructionCard}>
-        <Text style={styles.instructionMain}>
-          {activeAlert.mainInstruction}
-        </Text>
-        <Text style={styles.instructionDetail}>{activeAlert.detail}</Text>
-      </View>
+        <View style={styles.instructionCard}>
+          <Text style={styles.instructionMain}>
+            {activeAlert.mainInstruction}
+          </Text>
+          <Text style={styles.instructionDetail}>{activeAlert.detail}</Text>
+        </View>
 
-      <View style={styles.routeCard}>
-        <Text style={styles.routeLabel}>Your location</Text>
-        <Text style={styles.routeValue}>{profile.room}</Text>
+        <View style={styles.routeCard}>
+          <Text style={styles.routeLabel}>Your location</Text>
+          <Text style={styles.routeValue}>{profile.room}</Text>
 
-        <Text style={styles.routeLabel}>Guidance</Text>
-        <Text style={styles.routeValue}>{activeAlert.route}</Text>
-      </View>
+          <Text style={styles.routeLabel}>Guidance</Text>
+          <Text style={styles.routeValue}>{activeAlert.route}</Text>
+        </View>
 
-      <View style={styles.statusCard}>
-        <Text style={styles.statusLabel}>Your status</Text>
-        <Text style={styles.statusValue}>{student.status}</Text>
-      </View>
+        <View style={styles.statusCard}>
+          <Text style={styles.statusLabel}>Your status</Text>
+          <Text style={styles.statusValue}>{student.status}</Text>
+        </View>
 
-      <Pressable style={styles.safeButton} onPress={onSafe}>
-        <Text style={styles.bigButtonText}>I'm Safe</Text>
-      </Pressable>
+        <Pressable style={styles.safeButton} onPress={onSafe}>
+          <Text style={styles.bigButtonText}>I'm Safe</Text>
+        </Pressable>
 
-      <Pressable style={styles.helpButton} onPress={onNeedHelp}>
-        <Text style={styles.bigButtonText}>I Need Help</Text>
-      </Pressable>
+        <View style={styles.reasonCard}>
+          <Text style={styles.reasonTitle}>
+            If you need help, choose a reason:
+          </Text>
 
-      <Pressable style={styles.emergencyResetButton} onPress={onResetProfile}>
-        <Text style={styles.emergencyResetText}>Reset Demo Profile</Text>
-      </Pressable>
+          {[
+            "I cannot hear instructions",
+            "I cannot find the route",
+            "My route is blocked",
+            "I am injured",
+          ].map((reason) => (
+            <Pressable
+              key={reason}
+              style={[
+                styles.reasonButton,
+                helpReason === reason && styles.reasonButtonSelected,
+              ]}
+              onPress={() => setHelpReason(reason)}
+            >
+              <Text style={styles.reasonButtonText}>{reason}</Text>
+            </Pressable>
+          ))}
+        </View>
+
+        <Pressable
+          style={styles.helpButton}
+          onPress={() => onNeedHelp(helpReason)}
+        >
+          <Text style={styles.bigButtonText}>I Need Help</Text>
+        </Pressable>
+
+        <Pressable style={styles.emergencyResetButton} onPress={onResetProfile}>
+          <Text style={styles.emergencyResetText}>Reset Demo Profile</Text>
+        </Pressable>
+      </ScrollView>
     </SafeAreaView>
   );
 }
@@ -537,13 +628,17 @@ function DashboardScreen({
           >
             <Text style={styles.studentName}>{item.name}</Text>
             <Text style={styles.studentDetail}>Location: {item.location}</Text>
-            <Text style={styles.studentDetail}>
-              Class code: {item.classCode}
-            </Text>
+            <Text style={styles.studentDetail}>Class code: {item.classCode}</Text>
             <Text style={styles.studentDetail}>
               Accessibility: {item.accessibilityNeeds}
             </Text>
             <Text style={styles.studentStatus}>{item.status}</Text>
+
+            {item.status === "NEED_HELP" && item.helpReason && (
+              <Text style={styles.helpReasonText}>
+                Reason: {item.helpReason}
+              </Text>
+            )}
           </View>
         )}
       />
@@ -726,8 +821,13 @@ const styles = StyleSheet.create({
   },
   emergencyScreen: {
     flex: 1,
-    padding: 22,
+  },
+  emergencyScrollContent: {
+    flexGrow: 1,
     justifyContent: "center",
+    padding: 22,
+    paddingTop: 50,
+    paddingBottom: 40,
   },
   fireBackground: {
     backgroundColor: "#7F1D1D",
@@ -943,5 +1043,37 @@ const styles = StyleSheet.create({
     color: "#CBD5E1",
     fontSize: 16,
     textDecorationLine: "underline",
+  },
+  reasonCard: {
+    backgroundColor: "rgba(255,255,255,0.15)",
+    padding: 14,
+    borderRadius: 16,
+    marginBottom: 14,
+  },
+  reasonTitle: {
+    color: "white",
+    fontSize: 15,
+    fontWeight: "900",
+    marginBottom: 8,
+  },
+  reasonButton: {
+    backgroundColor: "rgba(255,255,255,0.18)",
+    padding: 10,
+    borderRadius: 12,
+    marginBottom: 8,
+  },
+  reasonButtonSelected: {
+    backgroundColor: "#2563EB",
+  },
+  reasonButtonText: {
+    color: "white",
+    fontSize: 14,
+    fontWeight: "800",
+  },
+  helpReasonText: {
+    color: "#FECACA",
+    fontSize: 15,
+    fontWeight: "800",
+    marginTop: 6,
   },
 });
