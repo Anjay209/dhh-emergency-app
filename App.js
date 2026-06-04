@@ -1,4 +1,4 @@
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import {
   SafeAreaView,
   StyleSheet,
@@ -8,6 +8,17 @@ import {
   View,
   FlatList,
 } from "react-native";
+import {
+  collection,
+  doc,
+  getDocs,
+  onSnapshot,
+  serverTimestamp,
+  setDoc,
+} from "firebase/firestore";
+import { db } from "./src/firebase";
+
+const SCHOOL_ID = "demo-school";
 
 const initialStudents = [
   {
@@ -26,62 +37,157 @@ const initialStudents = [
   },
 ];
 
+const activeAlertRef = doc(
+  db,
+  "schools",
+  SCHOOL_ID,
+  "control",
+  "activeAlert"
+);
+
+const statusesRef = collection(db, "schools", SCHOOL_ID, "statuses");
+
 export default function App() {
   const [role, setRole] = useState(null);
   const [name, setName] = useState("");
   const [activeAlert, setActiveAlert] = useState(null);
   const [students, setStudents] = useState(initialStudents);
+  const [loading, setLoading] = useState(true);
+
+  useEffect(() => {
+    async function seedStudentsIfNeeded() {
+      const snapshot = await getDocs(statusesRef);
+
+      if (snapshot.empty) {
+        for (const student of initialStudents) {
+          await setDoc(
+            doc(db, "schools", SCHOOL_ID, "statuses", student.id),
+            {
+              ...student,
+              updatedAt: serverTimestamp(),
+            },
+            { merge: true }
+          );
+        }
+      }
+    }
+
+    seedStudentsIfNeeded();
+  }, []);
+
+  useEffect(() => {
+    const unsubscribeAlert = onSnapshot(activeAlertRef, (snapshot) => {
+      if (!snapshot.exists()) {
+        setActiveAlert(null);
+        setLoading(false);
+        return;
+      }
+
+      const data = snapshot.data();
+      setActiveAlert(data.active ? data : null);
+      setLoading(false);
+    });
+
+    return unsubscribeAlert;
+  }, []);
+
+  useEffect(() => {
+    const unsubscribeStatuses = onSnapshot(statusesRef, (snapshot) => {
+      const rows = snapshot.docs.map((docSnap) => ({
+        id: docSnap.id,
+        ...docSnap.data(),
+      }));
+
+      if (rows.length > 0) {
+        setStudents(rows);
+      }
+    });
+
+    return unsubscribeStatuses;
+  }, []);
 
   function loginAs(selectedRole) {
     setRole(selectedRole);
   }
 
-  function createAlert(type) {
+  async function createAlert(type) {
     const alertCopy = getAlertCopy(type);
+    const alertId = Date.now().toString();
 
-    setActiveAlert({
-      id: Date.now().toString(),
+    await setDoc(activeAlertRef, {
+      id: alertId,
+      active: true,
       type,
       title: alertCopy.title,
       mainInstruction: alertCopy.mainInstruction,
       detail: alertCopy.detail,
       route: alertCopy.route,
+      createdAt: serverTimestamp(),
     });
 
-    setStudents((currentStudents) =>
-      currentStudents.map((student) => ({
-        ...student,
-        status: "NO_RESPONSE",
-      }))
-    );
+    for (const student of initialStudents) {
+      await setDoc(
+        doc(db, "schools", SCHOOL_ID, "statuses", student.id),
+        {
+          ...student,
+          status: "NO_RESPONSE",
+          activeAlertId: alertId,
+          updatedAt: serverTimestamp(),
+        },
+        { merge: true }
+      );
+    }
   }
 
-  function endAlert() {
-    setActiveAlert(null);
-    setStudents((currentStudents) =>
-      currentStudents.map((student) => ({
-        ...student,
-        status: "NO_RESPONSE",
-      }))
+  async function endAlert() {
+    await setDoc(
+      activeAlertRef,
+      {
+        active: false,
+        endedAt: serverTimestamp(),
+      },
+      { merge: true }
     );
+
+    for (const student of initialStudents) {
+      await setDoc(
+        doc(db, "schools", SCHOOL_ID, "statuses", student.id),
+        {
+          status: "NO_RESPONSE",
+          updatedAt: serverTimestamp(),
+        },
+        { merge: true }
+      );
+    }
   }
 
-  function updateStudentStatus(status) {
-    setStudents((currentStudents) =>
-      currentStudents.map((student) =>
-        student.id === "student-1"
-          ? {
-              ...student,
-              status,
-            }
-          : student
-      )
+  async function updateStudentStatus(status) {
+    await setDoc(
+      doc(db, "schools", SCHOOL_ID, "statuses", "student-1"),
+      {
+        id: "student-1",
+        name: "Anjay",
+        email: "anjay@student.com",
+        location: "Room 204",
+        status,
+        activeAlertId: activeAlert?.id ?? null,
+        updatedAt: serverTimestamp(),
+      },
+      { merge: true }
     );
   }
 
   function logout() {
     setRole(null);
     setName("");
+  }
+
+  if (loading) {
+    return (
+      <SafeAreaView style={styles.loadingScreen}>
+        <Text style={styles.loadingText}>Connecting to Firebase...</Text>
+      </SafeAreaView>
+    );
   }
 
   if (!role) {
@@ -116,10 +222,12 @@ export default function App() {
   }
 
   if (role === "student") {
+    const student = students.find((item) => item.id === "student-1") ?? initialStudents[0];
+
     return (
       <StudentScreen
         activeAlert={activeAlert}
-        student={students[0]}
+        student={student}
         onSafe={() => updateStudentStatus("SAFE")}
         onNeedHelp={() => updateStudentStatus("NEED_HELP")}
         onLogout={logout}
@@ -157,10 +265,12 @@ function StudentScreen({
           <Text style={styles.smallValue}>{student.name}</Text>
           <Text style={styles.smallLabel}>Location</Text>
           <Text style={styles.smallValue}>{student.location}</Text>
+          <Text style={styles.smallLabel}>Status</Text>
+          <Text style={styles.smallValue}>{student.status}</Text>
         </View>
 
         <Pressable style={styles.logoutButton} onPress={onLogout}>
-          <Text style={styles.logoutText}>Logout</Text>
+          <Text style={styles.logoutText}>Logout / Switch Role</Text>
         </Pressable>
       </SafeAreaView>
     );
@@ -203,12 +313,12 @@ function StudentScreen({
       </Pressable>
 
       <Pressable style={styles.helpButton} onPress={onNeedHelp}>
-  <Text style={styles.bigButtonText}>I Need Help</Text>
-</Pressable>
+        <Text style={styles.bigButtonText}>I Need Help</Text>
+      </Pressable>
 
-<Pressable style={styles.emergencyLogoutButton} onPress={onLogout}>
-  <Text style={styles.emergencyLogoutText}>Logout / Switch Role</Text>
-</Pressable>
+      <Pressable style={styles.emergencyLogoutButton} onPress={onLogout}>
+        <Text style={styles.emergencyLogoutText}>Logout / Switch Role</Text>
+      </Pressable>
     </SafeAreaView>
   );
 }
@@ -295,7 +405,7 @@ function DashboardScreen({
       />
 
       <Pressable style={styles.logoutButton} onPress={onLogout}>
-        <Text style={styles.logoutText}>Logout</Text>
+        <Text style={styles.logoutText}>Logout / Switch Role</Text>
       </Pressable>
     </SafeAreaView>
   );
@@ -338,6 +448,18 @@ function getAlertCopy(type) {
 }
 
 const styles = StyleSheet.create({
+  loadingScreen: {
+    flex: 1,
+    backgroundColor: "#0F172A",
+    justifyContent: "center",
+    alignItems: "center",
+    padding: 24,
+  },
+  loadingText: {
+    color: "white",
+    fontSize: 22,
+    fontWeight: "800",
+  },
   loginScreen: {
     flex: 1,
     backgroundColor: "#0F172A",
@@ -509,6 +631,17 @@ const styles = StyleSheet.create({
     borderRadius: 20,
     alignItems: "center",
   },
+  emergencyLogoutButton: {
+    marginTop: 18,
+    alignSelf: "center",
+    padding: 12,
+  },
+  emergencyLogoutText: {
+    color: "white",
+    fontSize: 16,
+    fontWeight: "800",
+    textDecorationLine: "underline",
+  },
   bigButtonText: {
     color: "white",
     fontSize: 26,
@@ -623,15 +756,4 @@ const styles = StyleSheet.create({
     fontSize: 16,
     textDecorationLine: "underline",
   },
-  emergencyLogoutButton: {
-  marginTop: 18,
-  alignSelf: "center",
-  padding: 12,
-},
-emergencyLogoutText: {
-  color: "white",
-  fontSize: 16,
-  fontWeight: "800",
-  textDecorationLine: "underline",
-},
 });
