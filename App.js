@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import {
   SafeAreaView,
   StyleSheet,
@@ -9,6 +9,7 @@ import {
   FlatList,
   ScrollView,
   Animated,
+  Image,
 } from "react-native";
 import AsyncStorage from "@react-native-async-storage/async-storage";
 import * as Haptics from "expo-haptics";
@@ -23,7 +24,51 @@ import {
 import { db } from "./src/firebase";
 
 const SCHOOL_ID = "demo-school";
-const PROFILE_STORAGE_KEY = "dhh_emergency_profile_v1";
+const PROFILE_STORAGE_KEY = "dhh_emergency_profile_v2";
+
+const HHS_MAP = require("./assets/hhs-map.png");
+
+const MAP_LOCATIONS = [
+  { key: "Building A", label: "Building A", x: 56, y: 69 },
+  { key: "Building B", label: "Building B", x: 43, y: 84 },
+  { key: "Building C", label: "Building C", x: 75, y: 42 },
+  { key: "Building E", label: "Building E", x: 79, y: 82 },
+  { key: "Building H", label: "Building H", x: 33, y: 55 },
+  { key: "Building L", label: "Building L", x: 83, y: 38 },
+  { key: "Building S", label: "Building S", x: 83, y: 24 },
+  { key: "Library", label: "Library", x: 54, y: 88 },
+  { key: "Field House", label: "Field House", x: 8, y: 55 },
+  { key: "Pool", label: "Pool", x: 25, y: 43 },
+  { key: "Cafeteria", label: "Cafeteria", x: 57, y: 26 },
+  { key: "Quad", label: "Quad", x: 52, y: 48 },
+  { key: "Mustang Field", label: "Mustang Field", x: 8, y: 30 },
+  { key: "Athletic Fields", label: "Athletic Fields", x: 52, y: 9 },
+  { key: "Parking Lot", label: "Parking Lot", x: 94, y: 48 },
+];
+
+const DANGER_ZONE_OPTIONS = [
+  "Building A",
+  "Building B",
+  "Building C",
+  "Building E",
+  "Building H",
+  "Building L",
+  "Building S",
+  "Library",
+  "Cafeteria",
+  "Pool",
+  "Quad",
+  "Field House",
+  "Parking Lot",
+];
+
+const ROUTE_OPTIONS = [
+  "Proceed north to Athletic Fields Assembly Area",
+  "Use east-side exit toward Parking Lot",
+  "Use west-side route toward Field House",
+  "Move to Quad, then proceed north",
+  "Shelter in place in nearest safe room",
+];
 
 const activeAlertRef = doc(
   db,
@@ -42,6 +87,53 @@ function getReadableTime() {
   });
 }
 
+function getLocationByKey(key) {
+  return MAP_LOCATIONS.find((item) => item.key === key);
+}
+
+function computeRoutePoints(startKey, routeOverride) {
+  const start = getLocationByKey(startKey) || getLocationByKey("Quad");
+  const athletic = getLocationByKey("Athletic Fields");
+  const parking = getLocationByKey("Parking Lot");
+  const fieldHouse = getLocationByKey("Field House");
+  const quad = getLocationByKey("Quad");
+
+  if (!routeOverride) {
+    return [start, quad, athletic].filter(Boolean);
+  }
+
+  const text = routeOverride.toLowerCase();
+
+  if (text.includes("parking")) {
+    return [start, getLocationByKey("Building L"), parking].filter(Boolean);
+  }
+
+  if (text.includes("field house") || text.includes("west")) {
+    return [start, getLocationByKey("Building H"), fieldHouse].filter(Boolean);
+  }
+
+  if (text.includes("shelter")) {
+    return [start];
+  }
+
+  if (text.includes("quad")) {
+    return [start, quad, athletic].filter(Boolean);
+  }
+
+  return [start, quad, athletic].filter(Boolean);
+}
+
+function buildRouteSegments(points) {
+  const segments = [];
+  for (let i = 0; i < points.length - 1; i += 1) {
+    segments.push({
+      from: points[i],
+      to: points[i + 1],
+    });
+  }
+  return segments;
+}
+
 export default function App() {
   const [profile, setProfile] = useState(null);
   const [activeAlert, setActiveAlert] = useState(null);
@@ -51,11 +143,9 @@ export default function App() {
   useEffect(() => {
     async function loadProfile() {
       const savedProfile = await AsyncStorage.getItem(PROFILE_STORAGE_KEY);
-
       if (savedProfile) {
         setProfile(JSON.parse(savedProfile));
       }
-
       setLoading(false);
     }
 
@@ -68,7 +158,6 @@ export default function App() {
         setActiveAlert(null);
         return;
       }
-
       const data = snapshot.data();
       setActiveAlert(data.active ? data : null);
     });
@@ -82,7 +171,6 @@ export default function App() {
         id: docSnap.id,
         ...docSnap.data(),
       }));
-
       setStudents(rows);
     });
 
@@ -102,7 +190,8 @@ export default function App() {
           role: "student",
           schoolCode: newProfile.schoolCode,
           classCode: newProfile.classCode,
-          location: newProfile.room,
+          room: newProfile.room,
+          campusLocation: newProfile.campusLocation,
           accessibilityNeeds: newProfile.accessibilityNeeds,
           status: "NO_RESPONSE",
           helpReason: null,
@@ -132,6 +221,8 @@ export default function App() {
       mainInstruction: alertCopy.mainInstruction,
       detail: alertCopy.detail,
       route: alertCopy.route,
+      routeOverride: "Proceed north to Athletic Fields Assembly Area",
+      dangerZones: [],
       latestUpdate: "Initial emergency alert issued.",
       createdAt: serverTimestamp(),
       updatedAt: serverTimestamp(),
@@ -155,16 +246,19 @@ export default function App() {
     }
   }
 
-  async function sendAlertUpdate(updateText) {
+  async function sendAlertUpdate(updateText, dangerZones, routeOverride) {
     if (!activeAlert) return;
 
     const cleanUpdate =
-      updateText.trim() || "Continue following the current emergency instructions.";
+      updateText.trim() ||
+      "Continue following the current emergency instructions.";
 
     await setDoc(
       activeAlertRef,
       {
         latestUpdate: cleanUpdate,
+        dangerZones,
+        routeOverride: routeOverride.trim(),
         updatedAt: serverTimestamp(),
         updatedAtText: getReadableTime(),
       },
@@ -213,7 +307,8 @@ export default function App() {
         role: "student",
         schoolCode: profile.schoolCode,
         classCode: profile.classCode,
-        location: profile.room,
+        room: profile.room,
+        campusLocation: profile.campusLocation,
         accessibilityNeeds: profile.accessibilityNeeds,
         status,
         helpReason: status === "NEED_HELP" ? helpReason : null,
@@ -242,7 +337,8 @@ export default function App() {
       students.find((item) => item.id === profile.id) ?? {
         id: profile.id,
         name: profile.name,
-        location: profile.room,
+        room: profile.room,
+        campusLocation: profile.campusLocation,
         classCode: profile.classCode,
         accessibilityNeeds: profile.accessibilityNeeds,
         status: "NO_RESPONSE",
@@ -279,6 +375,7 @@ function SetupScreen({ onSaveProfile }) {
   const [name, setName] = useState("");
   const [schoolCode, setSchoolCode] = useState("demo-school");
   const [room, setRoom] = useState("Room 204");
+  const [campusLocation, setCampusLocation] = useState("Building L");
   const [classCode, setClassCode] = useState("WONG-204");
   const [accessibilityNeeds, setAccessibilityNeeds] = useState(
     "Hard of hearing"
@@ -294,6 +391,7 @@ function SetupScreen({ onSaveProfile }) {
       name: name.trim() || (role === "student" ? "Student" : "Staff"),
       schoolCode: schoolCode.trim() || "demo-school",
       room: room.trim() || "Unknown room",
+      campusLocation,
       classCode: classCode.trim() || "GENERAL",
       accessibilityNeeds:
         accessibilityNeeds.trim() || "No accessibility needs listed",
@@ -308,11 +406,10 @@ function SetupScreen({ onSaveProfile }) {
         <Text style={styles.appTitle}>Emergency Profile Setup</Text>
         <Text style={styles.appSubtitle}>
           Set this up once during a normal school day. During an emergency, the
-          app will skip setup and open directly into emergency mode.
+          app opens directly into emergency mode.
         </Text>
 
         <Text style={styles.label}>Choose role</Text>
-
         <View style={styles.roleRow}>
           {["student", "teacher", "admin"].map((item) => (
             <Pressable
@@ -345,13 +442,20 @@ function SetupScreen({ onSaveProfile }) {
 
         {role === "student" && (
           <>
-            <Text style={styles.label}>Current/default room</Text>
+            <Text style={styles.label}>Room / class room</Text>
             <TextInput
               style={styles.input}
               placeholder="Room 204"
               placeholderTextColor="#94A3B8"
               value={room}
               onChangeText={setRoom}
+            />
+
+            <Text style={styles.label}>Current campus location</Text>
+            <HorizontalChoiceList
+              items={MAP_LOCATIONS.map((item) => item.key)}
+              selected={campusLocation}
+              onSelect={setCampusLocation}
             />
 
             <Text style={styles.label}>Accessibility needs</Text>
@@ -375,7 +479,6 @@ function SetupScreen({ onSaveProfile }) {
               value={classCode}
               onChangeText={setClassCode}
             />
-
             <Text style={styles.helperText}>
               Students and teachers with the same class code are matched
               automatically.
@@ -411,11 +514,9 @@ function StudentScreen({
 
       async function runAttentionSequence() {
         await Haptics.notificationAsync(Haptics.NotificationFeedbackType.Warning);
-
         setTimeout(() => {
           Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Heavy);
         }, 700);
-
         setTimeout(() => {
           Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Heavy);
         }, 1400);
@@ -458,8 +559,11 @@ function StudentScreen({
           <Text style={styles.smallLabel}>Student</Text>
           <Text style={styles.smallValue}>{profile.name}</Text>
 
-          <Text style={styles.smallLabel}>Location</Text>
+          <Text style={styles.smallLabel}>Room</Text>
           <Text style={styles.smallValue}>{profile.room}</Text>
+
+          <Text style={styles.smallLabel}>Campus location</Text>
+          <Text style={styles.smallValue}>{profile.campusLocation}</Text>
 
           <Text style={styles.smallLabel}>Class code</Text>
           <Text style={styles.smallValue}>{profile.classCode}</Text>
@@ -469,12 +573,14 @@ function StudentScreen({
 
           <Text style={styles.smallLabel}>Status</Text>
           <Text style={styles.smallValue}>{student.status}</Text>
-
-          <Text style={styles.smallLabel}>Last updated</Text>
-          <Text style={styles.smallValue}>
-            {student.updatedAtText || "Not updated yet"}
-          </Text>
         </View>
+
+        <CampusMapCard
+          title="Your Default Campus Position"
+          currentLocation={profile.campusLocation}
+          dangerZones={[]}
+          routeOverride=""
+        />
 
         <Pressable style={styles.resetButton} onPress={onResetProfile}>
           <Text style={styles.resetText}>Reset Demo Profile</Text>
@@ -482,6 +588,9 @@ function StudentScreen({
       </SafeAreaView>
     );
   }
+
+  const dangerZones = activeAlert.dangerZones || [];
+  const displayedRoute = activeAlert.routeOverride || activeAlert.route;
 
   return (
     <SafeAreaView
@@ -511,12 +620,20 @@ function StudentScreen({
         <View style={styles.updateCard}>
           <Text style={styles.updateLabel}>Latest update</Text>
           <Text style={styles.updateText}>
-            {activeAlert.latestUpdate || "Follow the current emergency instructions."}
+            {activeAlert.latestUpdate ||
+              "Follow the current emergency instructions."}
           </Text>
           <Text style={styles.updateTime}>
             Last updated: {activeAlert.updatedAtText || "just now"}
           </Text>
         </View>
+
+        <CampusMapCard
+          title="HHS Safety Map"
+          currentLocation={profile.campusLocation}
+          dangerZones={dangerZones}
+          routeOverride={displayedRoute}
+        />
 
         <View style={styles.instructionCard}>
           <Text style={styles.instructionMain}>
@@ -526,12 +643,26 @@ function StudentScreen({
         </View>
 
         <View style={styles.routeCard}>
-          <Text style={styles.routeLabel}>Your location</Text>
+          <Text style={styles.routeLabel}>Your room</Text>
           <Text style={styles.routeValue}>{profile.room}</Text>
 
+          <Text style={styles.routeLabel}>You are here</Text>
+          <Text style={styles.routeValue}>{profile.campusLocation}</Text>
+
           <Text style={styles.routeLabel}>Guidance</Text>
-          <Text style={styles.routeValue}>{activeAlert.route}</Text>
+          <Text style={styles.routeValue}>{displayedRoute}</Text>
         </View>
+
+        {dangerZones.length > 0 && (
+          <View style={styles.studentDangerCard}>
+            <Text style={styles.studentDangerTitle}>Avoid These Areas</Text>
+            {dangerZones.map((zone) => (
+              <Text key={zone} style={styles.studentDangerText}>
+                • {zone}
+              </Text>
+            ))}
+          </View>
+        )}
 
         <View style={styles.statusCard}>
           <Text style={styles.statusLabel}>Your status</Text>
@@ -542,7 +673,7 @@ function StudentScreen({
         </View>
 
         <Pressable style={styles.safeButton} onPress={onSafe}>
-          <Text style={styles.bigButtonText}>I'm Safe</Text>
+          <Text style={styles.bigButtonText}>I’m Safe</Text>
         </Pressable>
 
         <View style={styles.reasonCard}>
@@ -594,14 +725,40 @@ function DashboardScreen({
   onResetProfile,
 }) {
   const [updateText, setUpdateText] = useState("");
+  const [routeOverride, setRouteOverride] = useState(
+    "Proceed north to Athletic Fields Assembly Area"
+  );
+  const [selectedDangerZones, setSelectedDangerZones] = useState([]);
+
+  useEffect(() => {
+    if (!activeAlert) {
+      setRouteOverride("Proceed north to Athletic Fields Assembly Area");
+      setSelectedDangerZones([]);
+      return;
+    }
+
+    setRouteOverride(
+      activeAlert.routeOverride || "Proceed north to Athletic Fields Assembly Area"
+    );
+    setSelectedDangerZones(activeAlert.dangerZones || []);
+  }, [activeAlert]);
 
   const visibleStudents =
     profile.role === "teacher"
       ? students.filter((student) => student.classCode === profile.classCode)
       : students;
 
+  function toggleDangerZone(zone) {
+    setSelectedDangerZones((currentZones) => {
+      if (currentZones.includes(zone)) {
+        return currentZones.filter((item) => item !== zone);
+      }
+      return [...currentZones, zone];
+    });
+  }
+
   function handleSendUpdate() {
-    onSendAlertUpdate(updateText);
+    onSendAlertUpdate(updateText, selectedDangerZones, routeOverride);
     setUpdateText("");
   }
 
@@ -649,6 +806,15 @@ function DashboardScreen({
               )}
             </View>
 
+            {activeAlert && (
+              <CampusMapCard
+                title="Live HHS Map"
+                currentLocation="Quad"
+                dangerZones={activeAlert.dangerZones || []}
+                routeOverride={activeAlert.routeOverride || activeAlert.route}
+              />
+            )}
+
             {profile.role === "admin" && (
               <View style={styles.adminPanel}>
                 <Text style={styles.sectionTitle}>Create Alert</Text>
@@ -681,11 +847,27 @@ function DashboardScreen({
                   <Text style={styles.alertButtonText}>Trigger Drill</Text>
                 </Pressable>
 
-                <Text style={styles.sectionTitle}>Send Update</Text>
+                <Text style={styles.sectionTitle}>Danger Zones</Text>
+                <Text style={styles.helperText}>
+                  Tap any zone students must avoid.
+                </Text>
+                <ChipGrid
+                  items={DANGER_ZONE_OPTIONS}
+                  selectedItems={selectedDangerZones}
+                  onToggle={toggleDangerZone}
+                />
 
+                <Text style={styles.sectionTitle}>Route Override</Text>
+                <HorizontalChoiceList
+                  items={ROUTE_OPTIONS}
+                  selected={routeOverride}
+                  onSelect={setRouteOverride}
+                />
+
+                <Text style={styles.sectionTitle}>Send Update</Text>
                 <TextInput
                   style={styles.updateInput}
-                  placeholder="Example: Avoid Science Hallway. Use Exit C."
+                  placeholder="Example: Building C is blocked. Use Field House route."
                   placeholderTextColor="#94A3B8"
                   value={updateText}
                   onChangeText={setUpdateText}
@@ -733,7 +915,10 @@ function DashboardScreen({
             ]}
           >
             <Text style={styles.studentName}>{item.name}</Text>
-            <Text style={styles.studentDetail}>Location: {item.location}</Text>
+            <Text style={styles.studentDetail}>Room: {item.room}</Text>
+            <Text style={styles.studentDetail}>
+              Campus Location: {item.campusLocation}
+            </Text>
             <Text style={styles.studentDetail}>Class code: {item.classCode}</Text>
             <Text style={styles.studentDetail}>
               Accessibility: {item.accessibilityNeeds}
@@ -760,13 +945,175 @@ function DashboardScreen({
   );
 }
 
+function CampusMapCard({ title, currentLocation, dangerZones, routeOverride }) {
+  const routePoints = useMemo(
+    () => computeRoutePoints(currentLocation, routeOverride),
+    [currentLocation, routeOverride]
+  );
+
+  const routeSegments = useMemo(
+    () => buildRouteSegments(routePoints),
+    [routePoints]
+  );
+
+  return (
+    <View style={styles.mapCard}>
+      <Text style={styles.mapCardTitle}>{title}</Text>
+      <Text style={styles.mapCardSubtitle}>
+        HHS visual navigation view
+      </Text>
+
+      <View style={styles.mapLegendRow}>
+        <View style={styles.legendItem}>
+          <View style={[styles.legendDot, styles.legendBlue]} />
+          <Text style={styles.legendText}>You are here</Text>
+        </View>
+        <View style={styles.legendItem}>
+          <View style={[styles.legendDot, styles.legendRed]} />
+          <Text style={styles.legendText}>Danger zone</Text>
+        </View>
+        <View style={styles.legendItem}>
+          <View style={[styles.legendDot, styles.legendGreen]} />
+          <Text style={styles.legendText}>Safe route</Text>
+        </View>
+      </View>
+
+      <View style={styles.mapContainer}>
+        <Image source={HHS_MAP} style={styles.mapImage} resizeMode="contain" />
+
+        {routeSegments.map((segment, index) => (
+          <RouteLine
+            key={`${segment.from?.key}-${segment.to?.key}-${index}`}
+            from={segment.from}
+            to={segment.to}
+          />
+        ))}
+
+        {MAP_LOCATIONS.map((location) => {
+          const isCurrent = currentLocation === location.key;
+          const isDanger = dangerZones.includes(location.key);
+          const isRoutePoint = routePoints.some((point) => point?.key === location.key);
+
+          return (
+            <View
+              key={location.key}
+              style={[
+                styles.mapPin,
+                {
+                  left: `${location.x}%`,
+                  top: `${location.y}%`,
+                },
+              ]}
+            >
+              <View
+                style={[
+                  styles.mapPinDot,
+                  isCurrent && styles.currentPin,
+                  isDanger && styles.dangerPin,
+                  !isCurrent && !isDanger && isRoutePoint && styles.routePin,
+                ]}
+              />
+              {(isCurrent || isDanger) && (
+                <View style={styles.mapPinLabel}>
+                  <Text style={styles.mapPinLabelText}>{location.label}</Text>
+                </View>
+              )}
+            </View>
+          );
+        })}
+      </View>
+
+      <View style={styles.mapFooterBox}>
+        <Text style={styles.mapFooterLabel}>Current location</Text>
+        <Text style={styles.mapFooterValue}>{currentLocation}</Text>
+
+        <Text style={styles.mapFooterLabel}>Route</Text>
+        <Text style={styles.mapFooterValue}>
+          {routeOverride || "Proceed north to Athletic Fields Assembly Area"}
+        </Text>
+      </View>
+    </View>
+  );
+}
+
+function RouteLine({ from, to }) {
+  if (!from || !to) return null;
+
+  const x1 = from.x;
+  const y1 = from.y;
+  const x2 = to.x;
+  const y2 = to.y;
+
+  const dx = x2 - x1;
+  const dy = y2 - y1;
+  const length = Math.sqrt(dx * dx + dy * dy);
+  const angle = Math.atan2(dy, dx) * (180 / Math.PI);
+
+  return (
+    <View
+      style={[
+        styles.routeLine,
+        {
+          left: `${x1}%`,
+          top: `${y1}%`,
+          width: `${length}%`,
+          transform: [{ rotate: `${angle}deg` }],
+        },
+      ]}
+    />
+  );
+}
+
+function ChipGrid({ items, selectedItems, onToggle }) {
+  return (
+    <View style={styles.dangerZoneGrid}>
+      {items.map((item) => (
+        <Pressable
+          key={item}
+          style={[
+            styles.dangerZoneChip,
+            selectedItems.includes(item) && styles.dangerZoneChipSelected,
+          ]}
+          onPress={() => onToggle(item)}
+        >
+          <Text style={styles.dangerZoneChipText}>{item}</Text>
+        </Pressable>
+      ))}
+    </View>
+  );
+}
+
+function HorizontalChoiceList({ items, selected, onSelect }) {
+  return (
+    <ScrollView
+      horizontal
+      showsHorizontalScrollIndicator={false}
+      style={styles.horizontalChoices}
+      contentContainerStyle={styles.horizontalChoicesContent}
+    >
+      {items.map((item) => (
+        <Pressable
+          key={item}
+          style={[
+            styles.choiceChip,
+            selected === item && styles.choiceChipSelected,
+          ]}
+          onPress={() => onSelect(item)}
+        >
+          <Text style={styles.choiceChipText}>{item}</Text>
+        </Pressable>
+      ))}
+    </ScrollView>
+  );
+}
+
 function getAlertCopy(type) {
   if (type === "fire") {
     return {
       title: "FIRE ALERT",
       mainInstruction: "EVACUATE NOW",
-      detail: "Use the assigned route. Do not use elevators.",
-      route: "Proceed to Exit C. Assembly point: Tennis Courts.",
+      detail: "Move quickly, stay calm, and follow the approved safe route.",
+      route: "Proceed north to Athletic Fields Assembly Area",
     };
   }
 
@@ -774,8 +1121,8 @@ function getAlertCopy(type) {
     return {
       title: "LOCKDOWN",
       mainInstruction: "DO NOT EVACUATE",
-      detail: "Move away from doors and windows. Stay low and silent.",
-      route: "Stay inside your current room. Await visual updates.",
+      detail: "Move away from doors and windows. Stay low, quiet, and out of sight.",
+      route: "Shelter in place in nearest safe room",
     };
   }
 
@@ -783,23 +1130,23 @@ function getAlertCopy(type) {
     return {
       title: "EARTHQUAKE",
       mainInstruction: "DROP, COVER, HOLD ON",
-      detail: "Stay away from glass. Wait for visual instructions.",
-      route: "Take cover under sturdy furniture if available.",
+      detail: "Stay away from glass and heavy objects. Wait for visual updates.",
+      route: "Shelter in place in nearest safe room",
     };
   }
 
   return {
     title: "DRILL MODE",
     mainInstruction: "THIS IS A DRILL",
-    detail: "Practice the emergency response calmly.",
-    route: "Follow your school-approved drill route.",
+    detail: "Practice the emergency response calmly and follow staff guidance.",
+    route: "Proceed north to Athletic Fields Assembly Area",
   };
 }
 
 const styles = StyleSheet.create({
   loadingScreen: {
     flex: 1,
-    backgroundColor: "#0F172A",
+    backgroundColor: "#0B1220",
     justifyContent: "center",
     alignItems: "center",
     padding: 24,
@@ -811,11 +1158,12 @@ const styles = StyleSheet.create({
   },
   setupScreen: {
     flex: 1,
-    backgroundColor: "#0F172A",
+    backgroundColor: "#0B1220",
   },
   setupContent: {
     padding: 24,
     paddingTop: 60,
+    paddingBottom: 50,
   },
   appTitle: {
     color: "white",
@@ -825,7 +1173,7 @@ const styles = StyleSheet.create({
     marginBottom: 12,
   },
   appSubtitle: {
-    color: "#CBD5E1",
+    color: "#C7D2FE",
     fontSize: 17,
     textAlign: "center",
     marginBottom: 28,
@@ -839,20 +1187,20 @@ const styles = StyleSheet.create({
     marginTop: 12,
   },
   helperText: {
-    color: "#CBD5E1",
+    color: "#C7D2FE",
     fontSize: 14,
     lineHeight: 20,
     marginBottom: 10,
   },
   input: {
-    backgroundColor: "#1E293B",
+    backgroundColor: "#182235",
     color: "white",
     padding: 16,
-    borderRadius: 14,
+    borderRadius: 16,
     fontSize: 18,
     marginBottom: 8,
     borderWidth: 1,
-    borderColor: "#334155",
+    borderColor: "#273449",
   },
   roleRow: {
     flexDirection: "row",
@@ -861,9 +1209,9 @@ const styles = StyleSheet.create({
   },
   roleButton: {
     flex: 1,
-    backgroundColor: "#334155",
+    backgroundColor: "#24324A",
     padding: 12,
-    borderRadius: 12,
+    borderRadius: 14,
     alignItems: "center",
   },
   roleSelected: {
@@ -873,6 +1221,27 @@ const styles = StyleSheet.create({
     color: "white",
     fontSize: 12,
     fontWeight: "900",
+  },
+  horizontalChoices: {
+    marginBottom: 8,
+  },
+  horizontalChoicesContent: {
+    gap: 8,
+    paddingRight: 8,
+  },
+  choiceChip: {
+    backgroundColor: "#24324A",
+    paddingVertical: 12,
+    paddingHorizontal: 14,
+    borderRadius: 999,
+  },
+  choiceChipSelected: {
+    backgroundColor: "#0EA5E9",
+  },
+  choiceChipText: {
+    color: "white",
+    fontSize: 14,
+    fontWeight: "800",
   },
   saveButton: {
     backgroundColor: "#16A34A",
@@ -889,37 +1258,41 @@ const styles = StyleSheet.create({
   },
   normalScreen: {
     flex: 1,
-    backgroundColor: "#0F172A",
-    justifyContent: "center",
-    alignItems: "center",
-    padding: 24,
+    backgroundColor: "#0B1220",
+    padding: 20,
   },
   normalTitle: {
     color: "white",
     fontSize: 34,
     fontWeight: "900",
     marginBottom: 10,
+    textAlign: "center",
   },
   normalSubtitle: {
-    color: "#CBD5E1",
+    color: "#C7D2FE",
     fontSize: 20,
     marginBottom: 24,
+    textAlign: "center",
   },
   smallCard: {
-    backgroundColor: "#1E293B",
+    backgroundColor: "#162033",
     padding: 20,
-    borderRadius: 18,
+    borderRadius: 20,
     width: "100%",
-    marginBottom: 20,
+    marginBottom: 16,
+    borderWidth: 1,
+    borderColor: "#273449",
   },
   smallDashboardCard: {
-    backgroundColor: "#1E293B",
+    backgroundColor: "#162033",
     padding: 16,
-    borderRadius: 16,
+    borderRadius: 18,
     marginBottom: 8,
+    borderWidth: 1,
+    borderColor: "#273449",
   },
   smallLabel: {
-    color: "#94A3B8",
+    color: "#8FA5C8",
     fontSize: 14,
     fontWeight: "800",
     marginTop: 8,
@@ -934,26 +1307,25 @@ const styles = StyleSheet.create({
   },
   emergencyScrollContent: {
     flexGrow: 1,
-    justifyContent: "center",
-    padding: 22,
+    padding: 20,
     paddingTop: 50,
     paddingBottom: 40,
   },
   fireBackground: {
-    backgroundColor: "#7F1D1D",
+    backgroundColor: "#641B1B",
   },
   lockdownBackground: {
-    backgroundColor: "#78350F",
+    backgroundColor: "#6B3F10",
   },
   earthquakeBackground: {
-    backgroundColor: "#1E3A8A",
+    backgroundColor: "#153A7A",
   },
   drillBackground: {
-    backgroundColor: "#1E293B",
+    backgroundColor: "#0B1220",
   },
   emergencyTitle: {
     color: "white",
-    fontSize: 46,
+    fontSize: 44,
     fontWeight: "900",
     textAlign: "center",
     marginBottom: 18,
@@ -961,7 +1333,7 @@ const styles = StyleSheet.create({
   updateCard: {
     backgroundColor: "#FEF3C7",
     padding: 18,
-    borderRadius: 18,
+    borderRadius: 20,
     marginBottom: 16,
   },
   updateLabel: {
@@ -982,6 +1354,132 @@ const styles = StyleSheet.create({
     fontWeight: "800",
     marginTop: 8,
   },
+  mapCard: {
+    backgroundColor: "#101827",
+    borderRadius: 22,
+    padding: 14,
+    marginBottom: 16,
+    borderWidth: 1,
+    borderColor: "#2B374B",
+  },
+  mapCardTitle: {
+    color: "white",
+    fontSize: 20,
+    fontWeight: "900",
+  },
+  mapCardSubtitle: {
+    color: "#A5B4FC",
+    fontSize: 13,
+    fontWeight: "700",
+    marginTop: 4,
+    marginBottom: 10,
+  },
+  mapLegendRow: {
+    flexDirection: "row",
+    flexWrap: "wrap",
+    gap: 10,
+    marginBottom: 12,
+  },
+  legendItem: {
+    flexDirection: "row",
+    alignItems: "center",
+    gap: 6,
+  },
+  legendDot: {
+    width: 10,
+    height: 10,
+    borderRadius: 999,
+  },
+  legendBlue: {
+    backgroundColor: "#38BDF8",
+  },
+  legendRed: {
+    backgroundColor: "#EF4444",
+  },
+  legendGreen: {
+    backgroundColor: "#22C55E",
+  },
+  legendText: {
+    color: "#E2E8F0",
+    fontSize: 12,
+    fontWeight: "700",
+  },
+  mapContainer: {
+    position: "relative",
+    width: "100%",
+    aspectRatio: 4 / 3,
+    backgroundColor: "#E5E7EB",
+    borderRadius: 16,
+    overflow: "hidden",
+  },
+  mapImage: {
+    width: "100%",
+    height: "100%",
+  },
+  mapPin: {
+    position: "absolute",
+    transform: [{ translateX: -8 }, { translateY: -8 }],
+  },
+  mapPinDot: {
+    width: 16,
+    height: 16,
+    borderRadius: 999,
+    backgroundColor: "#94A3B8",
+    borderWidth: 2,
+    borderColor: "white",
+  },
+  currentPin: {
+    backgroundColor: "#38BDF8",
+    width: 20,
+    height: 20,
+  },
+  dangerPin: {
+    backgroundColor: "#EF4444",
+    width: 18,
+    height: 18,
+  },
+  routePin: {
+    backgroundColor: "#22C55E",
+  },
+  mapPinLabel: {
+    marginTop: 4,
+    backgroundColor: "rgba(15, 23, 42, 0.88)",
+    paddingVertical: 4,
+    paddingHorizontal: 6,
+    borderRadius: 8,
+    alignSelf: "flex-start",
+    maxWidth: 110,
+  },
+  mapPinLabelText: {
+    color: "white",
+    fontSize: 10,
+    fontWeight: "800",
+  },
+  routeLine: {
+    position: "absolute",
+    height: 4,
+    backgroundColor: "#22C55E",
+    borderRadius: 999,
+    transformOrigin: "left center",
+  },
+  mapFooterBox: {
+    marginTop: 12,
+    backgroundColor: "#162033",
+    borderRadius: 16,
+    padding: 12,
+  },
+  mapFooterLabel: {
+    color: "#8FA5C8",
+    fontSize: 12,
+    fontWeight: "800",
+    marginTop: 4,
+  },
+  mapFooterValue: {
+    color: "white",
+    fontSize: 15,
+    fontWeight: "900",
+    lineHeight: 22,
+  },
   instructionCard: {
     backgroundColor: "white",
     padding: 22,
@@ -1000,7 +1498,7 @@ const styles = StyleSheet.create({
     lineHeight: 28,
   },
   routeCard: {
-    backgroundColor: "rgba(255,255,255,0.15)",
+    backgroundColor: "rgba(255,255,255,0.14)",
     padding: 18,
     borderRadius: 18,
     marginBottom: 16,
@@ -1016,6 +1514,26 @@ const styles = StyleSheet.create({
     fontSize: 20,
     fontWeight: "800",
     marginBottom: 6,
+  },
+  studentDangerCard: {
+    backgroundColor: "#450A0A",
+    borderColor: "#FCA5A5",
+    borderWidth: 2,
+    padding: 18,
+    borderRadius: 18,
+    marginBottom: 16,
+  },
+  studentDangerTitle: {
+    color: "#FECACA",
+    fontSize: 18,
+    fontWeight: "900",
+    marginBottom: 8,
+  },
+  studentDangerText: {
+    color: "white",
+    fontSize: 18,
+    fontWeight: "800",
+    marginTop: 4,
   },
   statusCard: {
     backgroundColor: "rgba(255,255,255,0.18)",
@@ -1058,6 +1576,32 @@ const styles = StyleSheet.create({
     fontSize: 26,
     fontWeight: "900",
   },
+  reasonCard: {
+    backgroundColor: "rgba(255,255,255,0.15)",
+    padding: 14,
+    borderRadius: 16,
+    marginBottom: 14,
+  },
+  reasonTitle: {
+    color: "white",
+    fontSize: 15,
+    fontWeight: "900",
+    marginBottom: 8,
+  },
+  reasonButton: {
+    backgroundColor: "rgba(255,255,255,0.18)",
+    padding: 10,
+    borderRadius: 12,
+    marginBottom: 8,
+  },
+  reasonButtonSelected: {
+    backgroundColor: "#2563EB",
+  },
+  reasonButtonText: {
+    color: "white",
+    fontSize: 14,
+    fontWeight: "800",
+  },
   emergencyResetButton: {
     marginTop: 18,
     alignSelf: "center",
@@ -1071,7 +1615,7 @@ const styles = StyleSheet.create({
   },
   dashboardScreen: {
     flex: 1,
-    backgroundColor: "#0F172A",
+    backgroundColor: "#0B1220",
     padding: 20,
   },
   dashboardTitle: {
@@ -1088,10 +1632,12 @@ const styles = StyleSheet.create({
     marginBottom: 10,
   },
   activeAlertBox: {
-    backgroundColor: "#1E293B",
+    backgroundColor: "#162033",
     padding: 16,
     borderRadius: 16,
-    marginBottom: 8,
+    marginBottom: 12,
+    borderWidth: 1,
+    borderColor: "#273449",
   },
   activeAlertText: {
     color: "white",
@@ -1112,10 +1658,12 @@ const styles = StyleSheet.create({
     marginTop: 4,
   },
   adminPanel: {
-    backgroundColor: "#111827",
+    backgroundColor: "#101827",
     padding: 16,
     borderRadius: 18,
     marginBottom: 12,
+    borderWidth: 1,
+    borderColor: "#273449",
   },
   alertButton: {
     padding: 14,
@@ -1140,8 +1688,29 @@ const styles = StyleSheet.create({
     fontSize: 17,
     fontWeight: "900",
   },
+  dangerZoneGrid: {
+    flexDirection: "row",
+    flexWrap: "wrap",
+    gap: 8,
+    marginBottom: 10,
+  },
+  dangerZoneChip: {
+    backgroundColor: "#24324A",
+    paddingVertical: 10,
+    paddingHorizontal: 12,
+    borderRadius: 999,
+    marginBottom: 8,
+  },
+  dangerZoneChipSelected: {
+    backgroundColor: "#DC2626",
+  },
+  dangerZoneChipText: {
+    color: "white",
+    fontSize: 14,
+    fontWeight: "900",
+  },
   updateInput: {
-    backgroundColor: "#1E293B",
+    backgroundColor: "#182235",
     color: "white",
     minHeight: 80,
     padding: 14,
@@ -1149,7 +1718,7 @@ const styles = StyleSheet.create({
     fontSize: 16,
     marginBottom: 10,
     borderWidth: 1,
-    borderColor: "#334155",
+    borderColor: "#273449",
     textAlignVertical: "top",
   },
   sendUpdateButton: {
@@ -1208,6 +1777,12 @@ const styles = StyleSheet.create({
     fontWeight: "900",
     marginTop: 6,
   },
+  helpReasonText: {
+    color: "#FECACA",
+    fontSize: 15,
+    fontWeight: "800",
+    marginTop: 6,
+  },
   emptyText: {
     color: "#CBD5E1",
     fontSize: 16,
@@ -1223,37 +1798,5 @@ const styles = StyleSheet.create({
     color: "#CBD5E1",
     fontSize: 16,
     textDecorationLine: "underline",
-  },
-  reasonCard: {
-    backgroundColor: "rgba(255,255,255,0.15)",
-    padding: 14,
-    borderRadius: 16,
-    marginBottom: 14,
-  },
-  reasonTitle: {
-    color: "white",
-    fontSize: 15,
-    fontWeight: "900",
-    marginBottom: 8,
-  },
-  reasonButton: {
-    backgroundColor: "rgba(255,255,255,0.18)",
-    padding: 10,
-    borderRadius: 12,
-    marginBottom: 8,
-  },
-  reasonButtonSelected: {
-    backgroundColor: "#2563EB",
-  },
-  reasonButtonText: {
-    color: "white",
-    fontSize: 14,
-    fontWeight: "800",
-  },
-  helpReasonText: {
-    color: "#FECACA",
-    fontSize: 15,
-    fontWeight: "800",
-    marginTop: 6,
   },
 });
