@@ -35,6 +35,13 @@ const activeAlertRef = doc(
 
 const statusesRef = collection(db, "schools", SCHOOL_ID, "statuses");
 
+function getReadableTime() {
+  return new Date().toLocaleTimeString([], {
+    hour: "numeric",
+    minute: "2-digit",
+  });
+}
+
 export default function App() {
   const [profile, setProfile] = useState(null);
   const [activeAlert, setActiveAlert] = useState(null);
@@ -98,7 +105,9 @@ export default function App() {
           location: newProfile.room,
           accessibilityNeeds: newProfile.accessibilityNeeds,
           status: "NO_RESPONSE",
+          helpReason: null,
           updatedAt: serverTimestamp(),
+          updatedAtText: getReadableTime(),
         },
         { merge: true }
       );
@@ -113,6 +122,7 @@ export default function App() {
   async function createAlert(type) {
     const alertCopy = getAlertCopy(type);
     const alertId = Date.now().toString();
+    const updatedAtText = getReadableTime();
 
     await setDoc(activeAlertRef, {
       id: alertId,
@@ -122,7 +132,10 @@ export default function App() {
       mainInstruction: alertCopy.mainInstruction,
       detail: alertCopy.detail,
       route: alertCopy.route,
+      latestUpdate: "Initial emergency alert issued.",
       createdAt: serverTimestamp(),
+      updatedAt: serverTimestamp(),
+      updatedAtText,
     });
 
     const snapshot = await getDocs(statusesRef);
@@ -132,12 +145,31 @@ export default function App() {
         doc(db, "schools", SCHOOL_ID, "statuses", studentDoc.id),
         {
           status: "NO_RESPONSE",
+          helpReason: null,
           activeAlertId: alertId,
           updatedAt: serverTimestamp(),
+          updatedAtText,
         },
         { merge: true }
       );
     }
+  }
+
+  async function sendAlertUpdate(updateText) {
+    if (!activeAlert) return;
+
+    const cleanUpdate =
+      updateText.trim() || "Continue following the current emergency instructions.";
+
+    await setDoc(
+      activeAlertRef,
+      {
+        latestUpdate: cleanUpdate,
+        updatedAt: serverTimestamp(),
+        updatedAtText: getReadableTime(),
+      },
+      { merge: true }
+    );
   }
 
   async function endAlert() {
@@ -145,7 +177,10 @@ export default function App() {
       activeAlertRef,
       {
         active: false,
+        latestUpdate: "Emergency alert ended.",
         endedAt: serverTimestamp(),
+        updatedAt: serverTimestamp(),
+        updatedAtText: getReadableTime(),
       },
       { merge: true }
     );
@@ -157,8 +192,10 @@ export default function App() {
         doc(db, "schools", SCHOOL_ID, "statuses", studentDoc.id),
         {
           status: "NO_RESPONSE",
+          helpReason: null,
           activeAlertId: null,
           updatedAt: serverTimestamp(),
+          updatedAtText: getReadableTime(),
         },
         { merge: true }
       );
@@ -182,6 +219,7 @@ export default function App() {
         helpReason: status === "NEED_HELP" ? helpReason : null,
         activeAlertId: activeAlert?.id ?? null,
         updatedAt: serverTimestamp(),
+        updatedAtText: getReadableTime(),
       },
       { merge: true }
     );
@@ -208,6 +246,7 @@ export default function App() {
         classCode: profile.classCode,
         accessibilityNeeds: profile.accessibilityNeeds,
         status: "NO_RESPONSE",
+        updatedAtText: "Not updated yet",
       };
 
     return (
@@ -228,6 +267,7 @@ export default function App() {
       activeAlert={activeAlert}
       students={students}
       onCreateAlert={createAlert}
+      onSendAlertUpdate={sendAlertUpdate}
       onEndAlert={endAlert}
       onResetProfile={resetProfile}
     />
@@ -429,6 +469,11 @@ function StudentScreen({
 
           <Text style={styles.smallLabel}>Status</Text>
           <Text style={styles.smallValue}>{student.status}</Text>
+
+          <Text style={styles.smallLabel}>Last updated</Text>
+          <Text style={styles.smallValue}>
+            {student.updatedAtText || "Not updated yet"}
+          </Text>
         </View>
 
         <Pressable style={styles.resetButton} onPress={onResetProfile}>
@@ -463,6 +508,16 @@ function StudentScreen({
           {activeAlert.title}
         </Animated.Text>
 
+        <View style={styles.updateCard}>
+          <Text style={styles.updateLabel}>Latest update</Text>
+          <Text style={styles.updateText}>
+            {activeAlert.latestUpdate || "Follow the current emergency instructions."}
+          </Text>
+          <Text style={styles.updateTime}>
+            Last updated: {activeAlert.updatedAtText || "just now"}
+          </Text>
+        </View>
+
         <View style={styles.instructionCard}>
           <Text style={styles.instructionMain}>
             {activeAlert.mainInstruction}
@@ -481,6 +536,9 @@ function StudentScreen({
         <View style={styles.statusCard}>
           <Text style={styles.statusLabel}>Your status</Text>
           <Text style={styles.statusValue}>{student.status}</Text>
+          <Text style={styles.statusTime}>
+            Last status update: {student.updatedAtText || "Not updated yet"}
+          </Text>
         </View>
 
         <Pressable style={styles.safeButton} onPress={onSafe}>
@@ -531,87 +589,135 @@ function DashboardScreen({
   activeAlert,
   students,
   onCreateAlert,
+  onSendAlertUpdate,
   onEndAlert,
   onResetProfile,
 }) {
+  const [updateText, setUpdateText] = useState("");
+
   const visibleStudents =
     profile.role === "teacher"
       ? students.filter((student) => student.classCode === profile.classCode)
       : students;
 
+  function handleSendUpdate() {
+    onSendAlertUpdate(updateText);
+    setUpdateText("");
+  }
+
   return (
     <SafeAreaView style={styles.dashboardScreen}>
-      <Text style={styles.dashboardTitle}>
-        {profile.role === "admin" ? "Admin Command Center" : "Teacher Dashboard"}
-      </Text>
-
-      <View style={styles.smallDashboardCard}>
-        <Text style={styles.smallLabel}>Profile</Text>
-        <Text style={styles.smallValue}>{profile.name}</Text>
-
-        {profile.role === "teacher" && (
-          <>
-            <Text style={styles.smallLabel}>Class code</Text>
-            <Text style={styles.smallValue}>{profile.classCode}</Text>
-          </>
-        )}
-      </View>
-
-      <Text style={styles.sectionTitle}>Active Alert</Text>
-
-      <View style={styles.activeAlertBox}>
-        <Text style={styles.activeAlertText}>
-          {activeAlert ? activeAlert.title : "No active alert"}
-        </Text>
-      </View>
-
-      {profile.role === "admin" && (
-        <View style={styles.adminPanel}>
-          <Text style={styles.sectionTitle}>Create Alert</Text>
-
-          <Pressable
-            style={[styles.alertButton, styles.fireButton]}
-            onPress={() => onCreateAlert("fire")}
-          >
-            <Text style={styles.alertButtonText}>Trigger Fire</Text>
-          </Pressable>
-
-          <Pressable
-            style={[styles.alertButton, styles.lockdownButton]}
-            onPress={() => onCreateAlert("lockdown")}
-          >
-            <Text style={styles.alertButtonText}>Trigger Lockdown</Text>
-          </Pressable>
-
-          <Pressable
-            style={[styles.alertButton, styles.earthquakeButton]}
-            onPress={() => onCreateAlert("earthquake")}
-          >
-            <Text style={styles.alertButtonText}>Trigger Earthquake</Text>
-          </Pressable>
-
-          <Pressable
-            style={[styles.alertButton, styles.drillButton]}
-            onPress={() => onCreateAlert("drill")}
-          >
-            <Text style={styles.alertButtonText}>Trigger Drill</Text>
-          </Pressable>
-
-          <Pressable style={styles.endButton} onPress={onEndAlert}>
-            <Text style={styles.endButtonText}>End Alert</Text>
-          </Pressable>
-        </View>
-      )}
-
-      <Text style={styles.sectionTitle}>
-        {profile.role === "teacher"
-          ? "Matched Student Status"
-          : "All Student Status"}
-      </Text>
-
       <FlatList
         data={visibleStudents}
         keyExtractor={(item) => item.id}
+        ListHeaderComponent={
+          <View>
+            <Text style={styles.dashboardTitle}>
+              {profile.role === "admin"
+                ? "Admin Command Center"
+                : "Teacher Dashboard"}
+            </Text>
+
+            <View style={styles.smallDashboardCard}>
+              <Text style={styles.smallLabel}>Profile</Text>
+              <Text style={styles.smallValue}>{profile.name}</Text>
+
+              {profile.role === "teacher" && (
+                <>
+                  <Text style={styles.smallLabel}>Class code</Text>
+                  <Text style={styles.smallValue}>{profile.classCode}</Text>
+                </>
+              )}
+            </View>
+
+            <Text style={styles.sectionTitle}>Active Alert</Text>
+
+            <View style={styles.activeAlertBox}>
+              <Text style={styles.activeAlertText}>
+                {activeAlert ? activeAlert.title : "No active alert"}
+              </Text>
+
+              {activeAlert && (
+                <>
+                  <Text style={styles.dashboardUpdateText}>
+                    Update: {activeAlert.latestUpdate || "No update yet"}
+                  </Text>
+                  <Text style={styles.dashboardUpdateTime}>
+                    Last updated: {activeAlert.updatedAtText || "just now"}
+                  </Text>
+                </>
+              )}
+            </View>
+
+            {profile.role === "admin" && (
+              <View style={styles.adminPanel}>
+                <Text style={styles.sectionTitle}>Create Alert</Text>
+
+                <Pressable
+                  style={[styles.alertButton, styles.fireButton]}
+                  onPress={() => onCreateAlert("fire")}
+                >
+                  <Text style={styles.alertButtonText}>Trigger Fire</Text>
+                </Pressable>
+
+                <Pressable
+                  style={[styles.alertButton, styles.lockdownButton]}
+                  onPress={() => onCreateAlert("lockdown")}
+                >
+                  <Text style={styles.alertButtonText}>Trigger Lockdown</Text>
+                </Pressable>
+
+                <Pressable
+                  style={[styles.alertButton, styles.earthquakeButton]}
+                  onPress={() => onCreateAlert("earthquake")}
+                >
+                  <Text style={styles.alertButtonText}>Trigger Earthquake</Text>
+                </Pressable>
+
+                <Pressable
+                  style={[styles.alertButton, styles.drillButton]}
+                  onPress={() => onCreateAlert("drill")}
+                >
+                  <Text style={styles.alertButtonText}>Trigger Drill</Text>
+                </Pressable>
+
+                <Text style={styles.sectionTitle}>Send Update</Text>
+
+                <TextInput
+                  style={styles.updateInput}
+                  placeholder="Example: Avoid Science Hallway. Use Exit C."
+                  placeholderTextColor="#94A3B8"
+                  value={updateText}
+                  onChangeText={setUpdateText}
+                  multiline
+                />
+
+                <Pressable
+                  style={[
+                    styles.sendUpdateButton,
+                    !activeAlert && styles.disabledButton,
+                  ]}
+                  onPress={handleSendUpdate}
+                  disabled={!activeAlert}
+                >
+                  <Text style={styles.sendUpdateButtonText}>
+                    Send Alert Update
+                  </Text>
+                </Pressable>
+
+                <Pressable style={styles.endButton} onPress={onEndAlert}>
+                  <Text style={styles.endButtonText}>End Alert</Text>
+                </Pressable>
+              </View>
+            )}
+
+            <Text style={styles.sectionTitle}>
+              {profile.role === "teacher"
+                ? "Matched Student Status"
+                : "All Student Status"}
+            </Text>
+          </View>
+        }
         ListEmptyComponent={
           <Text style={styles.emptyText}>
             No matched students yet. Use the same class code on a student setup.
@@ -633,6 +739,9 @@ function DashboardScreen({
               Accessibility: {item.accessibilityNeeds}
             </Text>
             <Text style={styles.studentStatus}>{item.status}</Text>
+            <Text style={styles.studentDetail}>
+              Last updated: {item.updatedAtText || "Not updated yet"}
+            </Text>
 
             {item.status === "NEED_HELP" && item.helpReason && (
               <Text style={styles.helpReasonText}>
@@ -641,11 +750,12 @@ function DashboardScreen({
             )}
           </View>
         )}
+        ListFooterComponent={
+          <Pressable style={styles.resetButton} onPress={onResetProfile}>
+            <Text style={styles.resetText}>Reset Demo Profile</Text>
+          </Pressable>
+        }
       />
-
-      <Pressable style={styles.resetButton} onPress={onResetProfile}>
-        <Text style={styles.resetText}>Reset Demo Profile</Text>
-      </Pressable>
     </SafeAreaView>
   );
 }
@@ -848,6 +958,30 @@ const styles = StyleSheet.create({
     textAlign: "center",
     marginBottom: 18,
   },
+  updateCard: {
+    backgroundColor: "#FEF3C7",
+    padding: 18,
+    borderRadius: 18,
+    marginBottom: 16,
+  },
+  updateLabel: {
+    color: "#78350F",
+    fontSize: 14,
+    fontWeight: "900",
+    marginBottom: 6,
+  },
+  updateText: {
+    color: "#111827",
+    fontSize: 20,
+    fontWeight: "900",
+    lineHeight: 28,
+  },
+  updateTime: {
+    color: "#78350F",
+    fontSize: 14,
+    fontWeight: "800",
+    marginTop: 8,
+  },
   instructionCard: {
     backgroundColor: "white",
     padding: 22,
@@ -899,6 +1033,12 @@ const styles = StyleSheet.create({
     fontSize: 24,
     fontWeight: "900",
     marginTop: 4,
+  },
+  statusTime: {
+    color: "#CBD5E1",
+    fontSize: 14,
+    fontWeight: "800",
+    marginTop: 6,
   },
   safeButton: {
     backgroundColor: "#16A34A",
@@ -958,6 +1098,19 @@ const styles = StyleSheet.create({
     fontSize: 20,
     fontWeight: "800",
   },
+  dashboardUpdateText: {
+    color: "#E2E8F0",
+    fontSize: 16,
+    fontWeight: "800",
+    marginTop: 8,
+    lineHeight: 22,
+  },
+  dashboardUpdateTime: {
+    color: "#94A3B8",
+    fontSize: 14,
+    fontWeight: "800",
+    marginTop: 4,
+  },
   adminPanel: {
     backgroundColor: "#111827",
     padding: 16,
@@ -983,6 +1136,33 @@ const styles = StyleSheet.create({
     backgroundColor: "#475569",
   },
   alertButtonText: {
+    color: "white",
+    fontSize: 17,
+    fontWeight: "900",
+  },
+  updateInput: {
+    backgroundColor: "#1E293B",
+    color: "white",
+    minHeight: 80,
+    padding: 14,
+    borderRadius: 14,
+    fontSize: 16,
+    marginBottom: 10,
+    borderWidth: 1,
+    borderColor: "#334155",
+    textAlignVertical: "top",
+  },
+  sendUpdateButton: {
+    backgroundColor: "#2563EB",
+    padding: 14,
+    borderRadius: 14,
+    alignItems: "center",
+    marginBottom: 10,
+  },
+  disabledButton: {
+    opacity: 0.45,
+  },
+  sendUpdateButtonText: {
     color: "white",
     fontSize: 17,
     fontWeight: "900",
